@@ -1,8 +1,10 @@
 ﻿from __future__ import annotations
+import ast
 import re
 import json
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
+import time
 
 # Imports from our refactored packages
 from rag_pipeline.llm_factory import get_llm
@@ -182,12 +184,12 @@ def _handle_question_intent(
 def _robust_tool_parser(action_str: str) -> (str, Dict):
     """
     Parses 'tool_name("arg1", key="arg2")' into (tool_name, kwargs)
-    Handles multiline strings in arguments.
+    Handles multiline strings, JSON arguments, and "chatter" from LLMs.
     """
     action_str = action_str.strip()
 
-    # 1. Extract tool name
-    match = re.match(r'(\w+)\s*\((.*)\)\s*$', action_str, re.DOTALL)
+    # 1. Extract tool name and arguments (using search to ignore "chatter")
+    match = re.search(r'(\w+)\s*\((.*)\)', action_str, re.DOTALL)
     if not match:
         raise ValueError(f"Invalid action format. Expected tool_name(...). Got: {action_str}")
 
@@ -197,102 +199,124 @@ def _robust_tool_parser(action_str: str) -> (str, Dict):
     kwargs = {}
     pos_args = []
 
-    if not args_str: return tool_name, kwargs
+    if not args_str:
+        return tool_name, kwargs
 
-    # 2. Split arguments by comma, but respect quotes AND brackets
-    # This is a simplified parser; it will fail on nested brackets/quotes.
-    args = re.split(
-        r',(?=(?:[^"]*"[^"]*")*[^"]*$)(?=(?:[^\']*"[^\']*\')*[^\']*$)(?=(?:[^\[\]]*\[[^\[\]]*\])*[^\[\]]*$)', args_str)
+    # 2. Handle JSON-style arguments (common with Ollama/Llama3)
+    if args_str.startswith('{') and args_str.endswith('}'):
+        try:
+            kwargs = json.loads(args_str)
+        except json.JSONDecodeError:
+            # Fallback to string parsing if JSON fails
+            pass
 
-    for arg in args:
-        arg = arg.strip()
-        if not arg: continue
+    # 3. Handle standard Python-style arguments (if not parsed as JSON)
+    if not kwargs:
+        # Split arguments by comma, but respect quotes AND brackets
+        args = re.split(
+            r',(?=(?:[^"]*"[^"]*")*[^"]*$)(?=(?:[^\']*"[^\']*\')*[^\']*$)(?=(?:[^\[\]]*\[[^\[\]]*\])*[^\[\]]*$)',
+            args_str)
 
-        # 3. Check for keyword arguments (key=value)
-        kv_match = re.match(r'(\w+)\s*=\s*(.*)', arg, re.DOTALL)
-        if kv_match:
-            key = kv_match.group(1).strip()
-            value = kv_match.group(2).strip()
-            # De-quote simple strings
-            if value.startswith('"') and value.endswith('"'):
-                value = value[1:-1]
-            elif value.startswith("'") and value.endswith("'"):
-                value = value[1:-1]
-            kwargs[key] = value
-        else:
-            # 4. Otherwise, it's a positional argument
-            pos_args.append(arg.strip('"\' '))
+        for arg in args:
+            arg = arg.strip()
+            if not arg:
+                continue
 
-    # 5. Map positional args
-    if tool_name == 'inspect_file':
-        if pos_args and 'relative_path' not in kwargs:
-            kwargs['relative_path'] = pos_args.pop(0)
-        if pos_args and 'center_line' not in kwargs:
-            kwargs['center_line'] = pos_args.pop(0)
-    elif tool_name == 'search_repo':
+            # Check for keyword arguments (key=value)
+            kv_match = re.match(r'(\w+)\s*=\s*(.*)', arg, re.DOTALL)
+            if kv_match:
+                key = kv_match.group(1).strip()
+                value = kv_match.group(2).strip()
+
+                # De-quote simple strings (leave complex ones for ast/json)
+                if (value.startswith('"') and value.endswith('"')) or \
+                        (value.startswith("'") and value.endswith("'")):
+                    try:
+                        # Użyj ast.literal_eval do bezpiecznego od-cytowania stringu
+                        kwargs[key] = ast.literal_eval(value)
+                    except Exception:
+                        kwargs[key] = value[1:-1]  # Fallback
+                else:
+                    kwargs[key] = value
+            else:
+                # Otherwise, it's a positional argument
+                pos_args.append(arg.strip('"\' '))
+
+    # 4. Map positional args and convert types based on tool name
+    #    (Bloki 'elif' są kluczowe, aby zapobiec błędom)
+
+    if tool_name == 'search_repo':
         if pos_args and 'query' not in kwargs:
             kwargs['query'] = pos_args[0]
+
     elif tool_name == 'rag_retrieve':
         if pos_args and 'question' not in kwargs:
             kwargs['question'] = pos_args[0]
 
-    # --- !! POPRAWKA PARSERA propose_patch I finish !! ---
-    # Te narzędzia mają specjalne, wieloliniowe argumenty
+
+    elif tool_name == 'inspect_file':
+        if pos_args and 'relative_path' not in kwargs:
+            kwargs['relative_path'] = pos_args.pop(0)
+        if pos_args and 'center_line' not in kwargs:
+            kwargs['center_line'] = pos_args.pop(0)
+
+            # --- !! POPRAWKA: Konwersja typów przeniesiona tutaj !! ---
+        if 'center_line' in kwargs and kwargs['center_line'] is not None and kwargs['center_line'] != 'None':
+            try:
+                kwargs['center_line'] = int(kwargs['center_line'])
+            except (ValueError, TypeError):
+                kwargs['center_line'] = None  # Błąd parsowania, ustaw na None
+        elif 'center_line' in kwargs:
+            kwargs['center_line'] = None
+
+        if 'window' in kwargs and kwargs['window'] is not None:
+            try:
+                kwargs['window'] = int(kwargs['window'])
+            except (ValueError, TypeError):
+                kwargs['window'] = 20  # Błąd parsowania, ustaw na default
+        elif 'center_line' in kwargs:
+            kwargs['center_line'] = None
+        if 'window' in kwargs and kwargs['window'] is not None:
+            try:
+                kwargs['window'] = int(kwargs['window'])
+            except (ValueError, TypeError):
+                kwargs['window'] = 20
 
     elif tool_name == 'propose_patch':
-        # Regex to find issue_description="...", evidence_snippets=[...]
-        issue_match = re.search(r'issue_description\s*=\s*(["\'])(.*?)\1', args_str, re.DOTALL)
-        evidence_match = re.search(r'evidence_snippets\s*=\s*(\[.*?\])', args_str, re.DOTALL)
-
+        # Parse 'issue_description'
+        issue_match = re.search(r'issue_description\s*=\s*("""|\'\'\'|["\'])(.*?)\1', args_str, re.DOTALL)
         if issue_match:
             kwargs['issue_description'] = issue_match.group(2)
         elif pos_args:
             kwargs['issue_description'] = pos_args.pop(0)
 
+        # Parse 'evidence_snippets' (handles multiline strings)
+        evidence_match = re.search(r'evidence_snippets\s*=\s*(\[.*\])', args_str, re.DOTALL)
         if evidence_match:
-            # Safely evaluate the list string
+            snippets_str = evidence_match.group(1)
             try:
-                # Use json.loads for robust parsing of list-of-strings
-                snippet_list_str = evidence_match.group(1).replace('"""', '"')
-                kwargs['evidence_snippets'] = json.loads(snippet_list_str)
-            except json.JSONDecodeError:
-                # Fallback for simple case like ["snippet"]
-                simple_match = re.search(r'\[\s*(["\'])(.*?)\1\s*\]', evidence_match.group(1), re.DOTALL)
-                if simple_match:
-                    kwargs['evidence_snippets'] = [simple_match.group(2)]
-                else:
-                    kwargs['evidence_snippets'] = []  # Failed to parse
-        elif pos_args:
-            kwargs['evidence_snippets'] = pos_args  # Assume remaining args are snippets
+                kwargs['evidence_snippets'] = ast.literal_eval(snippets_str)
+            except Exception:
+                kwargs['evidence_snippets'] = [snippets_str]  # Fallback
+        else:
+            kwargs['evidence_snippets'] = []
 
     elif tool_name == 'finish':
-        # Regex to find reasoning_summary="...", patch_markdown="..."
-        reason_match = re.search(r'reasoning_summary\s*=\s*(["\'])(.*?)\1', args_str, re.DOTALL)
-        patch_match = re.search(r'patch_markdown\s*=\s*(["\'])(.*?)\1', args_str, re.DOTALL)
-
+        # Parse 'reasoning_summary' (handles multiline)
+        reason_match = re.search(r'reasoning_summary\s*=\s*("""|\'\'\'|["\'])(.*?)\1', args_str, re.DOTALL)
         if reason_match:
             kwargs['reasoning_summary'] = reason_match.group(2)
         elif pos_args:
-            kwargs['reasoning_summary'] = pos_args.pop(0)  # Fallback
+            kwargs['reasoning_summary'] = pos_args.pop(0)
 
+        # Parse 'patch_markdown' (handles multiline)
+        patch_match = re.search(r'patch_markdown\s*=\s*("""|\'\'\'|["\'])(.*?)\1', args_str, re.DOTALL)
         if patch_match:
             kwargs['patch_markdown'] = patch_match.group(2)
         elif pos_args:
-            kwargs['patch_markdown'] = pos_args.pop(0)  # Fallback
-    # --- Koniec Poprawki ---
-
-    # 6. Convert types
-    # --- !! POPRAWKA: Przeniesione do bloku tool_name == 'inspect_file' !! ---
-    if tool_name == 'inspect_file':
-        if 'center_line' in kwargs and kwargs['center_line'] is not None and kwargs['center_line'] != 'None':
-            kwargs['center_line'] = int(kwargs['center_line'])
-        elif 'center_line' in kwargs:
-            kwargs['center_line'] = None
-        if 'window' in kwargs and kwargs['window'] is not None:
-            kwargs['window'] = int(kwargs['window'])
+            kwargs['patch_markdown'] = pos_args.pop(0)
 
     return tool_name, kwargs
-
 
 def _parse_and_execute_tool(action_str: str, llm_backend: str, temperature: float) -> (bool, str, Any):
     """
@@ -363,11 +387,9 @@ def _handle_task_intent_react(
     history: List[str] = []  # Stores the Thought/Action/Observation history
     prompt_template = PromptTemplate.from_template(AGENT_TASK_PROMPT)
 
-    # --- !! ZBIERAMY DOWODY DLA KRYTYKA !! ---
     all_search_hits = []
     all_inspected_snippets = []
     all_rag_sources = []
-    # --- Koniec Zbierania ---
 
     for i in range(MAX_STEPS):
         print(f"[INFO] ReAct Step {i + 1}/{MAX_STEPS}")
@@ -376,36 +398,40 @@ def _handle_task_intent_react(
             "history": "\n".join(history),
             "question": question
         })
-
+        time.sleep(2)
         resp = llm.invoke(current_prompt)
         full_response = (getattr(resp, "content", None) or str(resp)).strip()
 
         try:
-            # --- !! NOWY, ODPORNY PARSER MYŚLI/AKCJI !! ---
-            # Znajdź 'Thought:', a potem 'Action:', które może być wieloliniowe
-            thought_match = re.search(r"Thought: (.*?)(?=Action:|$)", full_response, re.DOTALL)
+            # Szukamy akcji, bo jest kluczowa.
             action_match = re.search(r"Action: (.*)", full_response, re.DOTALL)
 
-            if not thought_match or not action_match:
-                raise ValueError("Missing Thought or Action")
+            if not action_match:
+                # Jeśli nie ma nawet 'Action:', odpowiedź jest bezużyteczna
+                raise ValueError(f"Missing 'Action:' in LLM response")
 
-            thought = thought_match.group(1).strip()
-            # Cały blok akcji (może być wieloliniowy)
             action = action_match.group(1).strip()
-            # --- Koniec Poprawki ---
+
+            # 'Thought:' jest teraz opcjonalna.
+            thought_match = re.search(r"Thought: (.*?)(?=Action:|$)", full_response, re.DOTALL)
+
+            if thought_match:
+                thought = thought_match.group(1).strip()
+            else:
+                thought = "(Thought missing in LLM response)"
 
             history.append(f"Thought: {thought}\nAction: {action}")
             print(f"  [Thought] {thought}")
-        except Exception:
+        except Exception as e:
             history.append(f"Observation: Invalid response format. {full_response}")
+            print(f"  [DEBUG] LLM zwrócił: {full_response}")
+            print(f"  [DEBUG] Błąd parsera: {e}")
             print(f"  [Observe] Invalid response format. Trying again.")
             continue
 
-            # Przechwytujemy 'raw_data'
         is_finished, result_str, raw_data = _parse_and_execute_tool(action, llm_backend, temperature)
 
-        # Kolekcjonuj dowody
-        if raw_data is not None:  # **POPRAWKA: Sprawdzaj czy nie jest None**
+        if raw_data is not None:
             if action.startswith("search_repo"):
                 all_search_hits.extend(raw_data)  # raw_data to lista
             elif action.startswith("inspect_file"):
@@ -428,8 +454,8 @@ def _handle_task_intent_react(
         }
 
     # Assemble Final Answer
-    patch_markdown = final_data.get("patch", "")
-    reasoning_summary = final_data.get("reasoning", "No summary provided.")
+    patch_markdown = final_data.get("patch_markdown", "")
+    reasoning_summary = final_data.get("reasoning_summary", "No summary provided.")
 
     final_answer = (
         f"#### Agent Reasoning\n"
@@ -438,7 +464,6 @@ def _handle_task_intent_react(
         f"{patch_markdown if patch_markdown else '(No patch proposed)'}\n"
     )
 
-    # --- !! PODAJEMY DOWODY DO KRYTYKA !! ---
     src_summary = _summarize_sources_for_critic(
         all_search_hits,
         all_inspected_snippets,
@@ -447,7 +472,6 @@ def _handle_task_intent_react(
     print("\n" + "-" * 30 + " CRITIC SUMMARY " + "-" * 30)
     print(src_summary)
     print("-" * 80)
-    # --- Koniec Podawania ---
 
     try:
         critic = evaluate_step(
@@ -477,7 +501,7 @@ def _handle_task_intent_react(
         answer=final_answer,
         patch_markdown=patch_markdown,
         search_hits=all_search_hits,
-        inspected_snippets=all_inspected_snippets,  # **ZMIENIONE NA LISTĘ**
+        inspected_snippets=all_inspected_snippets,
         rag_answer=reasoning_summary,
         rag_sources=all_rag_sources,
         critic=critic,

@@ -6,7 +6,7 @@
     subgraph "Agent Core"
         C --> R{"Router (_get_intent)"}
 
-        %% 3. Path A: Question
+        %% 3. Path A: Question (RAG)
         R -- "intent: question" --> HQ["_handle_question_intent"]
         HQ --> T_RAG("Call Tool: rag_retrieve")
         T_RAG --> F["Format RAG Answer"]
@@ -14,7 +14,7 @@
         E_Q --> Out["Final Result (AgentResult)"]
 
         %% 4. Path B: Task (ReAct Loop)
-        R -- "intent: task_patch" --> HT["Start ReAct Loop (_handle_task...)"]
+        R -- "intent: task_patch" --> HT["Start ReAct Loop (_handle_task_intent_react)"]
 
         subgraph "ReAct Loop (Reason/Act)"
             direction TB
@@ -22,12 +22,15 @@
             T --> A["Action (LLM Output)"]
             A --> TE{"Tool Executor (_parse_...)"}
 
+            %% Tools available in the loop
             TE -- "search..." --> T1("Call Tool: search_repo")
             TE -- "inspect..." --> T2("Call Tool: inspect_file")
+            TE -- "rag..." --> T4("Call Tool: rag_retrieve")
             TE -- "propose..." --> T3("Call Tool: propose_patch")
 
             T1 --> O["Observation (data)"]
             T2 --> O
+            T4 --> O
             T3 --> O_Patch["Observation (patch_markdown)"]
 
             O --> HT
@@ -38,7 +41,7 @@
 
         F_Task --> E_T["Evaluate (Critic)"]
 
-        %% 5. Finalize PR (ONLY for Task Path)
+        %% 5. Finalize PR
         E_T --> C_PR{"Check Score >= Threshold"}
         C_PR -- "No (Score too low)" --> Out
         C_PR -- "Yes (Score is high)" --> T_PR["Call Tool: generate_pr_payload"]
@@ -47,14 +50,22 @@
 
     %% 6. Dependencies
     subgraph "Data & LLMs"
-        T_RAG --> V["(ChromaDB)"]
+        %% Vectors
+        T_RAG -- "Retrieves context" --> V["(ChromaDB)"]
+        T4 -- "Retrieves context" --> V
+
         T1 --> FS["(File System)"]
         T2 --> FS
+
+        %% LLM-y
+        T --> LLM_Main["LLM (Agent Brain / RAG)"]
+        R --> LLM_Main
+
+        T_RAG -- "Augments query & synthesizes answer" --> LLM_Main
+
+        T4 -- "Augments query & synthesizes answer" --> LLM_Main
 
         T3 --> LLM_Patch["LLM (Patcher)"]
         E_Q --> LLM_Critic["LLM (Critic)"]
         E_T --> LLM_Critic
-        T --> LLM_Agent["LLM (Agent Brain)"]
-        R --> LLM_Agent
-        HQ --> LLM_Agent
     end
