@@ -30,7 +30,7 @@ os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
 # -------------------------------------------------------------------
 SUPPORTED_CODE_FILES = {
     ".cs", ".py", ".js", ".ts", ".java", ".html",
-    ".json", ".md", ".txt", ".sh", ".bash", ".yaml", ".yml"
+    ".json", ".md", ".txt", ".sh", ".bash", ".yaml", ".yml", ".mmd"
 }
 
 DEFAULT_EXCLUDED_DIRS = {

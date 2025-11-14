@@ -147,7 +147,7 @@ def _handle_question_intent(
 
     rag_res = rag_retrieve(
         question=question, k=5, llm_backend=llm_backend,
-        temperature=temperature, use_augmentation=True
+        temperature=temperature, use_augmentation=False
     )
     rag_answer = rag_res["answer"]
     rag_sources = rag_res["sources"]

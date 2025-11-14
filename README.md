@@ -72,7 +72,7 @@ Python deps are listed in `requirements.txt`.
 ### 4.1. Clone & create virtualenv
 
 ```bash
-git clone <your-repo-url> RepoCopilot
+git clone https://github.com/hsokolowski/RepoCopilot.git RepoCopilot
 cd RepoCopilot
 
 python -m venv .venv
