@@ -1,0 +1,15 @@
+﻿metrics:
+  grounding:
+    weight: 0.4
+    description: "How clearly is the answer grounded in the repository context and tools?"
+  usefulness:
+    weight: 0.4
+    description: "How helpful and actionable is the answer for a developer?"
+  reflection:
+    weight: 0.2
+    description: "Does the agent show awareness of uncertainties, limitations, or next steps?"
+
+overall_pass_threshold: 0.7
+description: >
+  Overall score is a weighted average of grounding, usefulness, and reflection.
+  A question is considered 'passed' if overall >= overall_pass_threshold.

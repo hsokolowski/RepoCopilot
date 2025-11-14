@@ -1,0 +1,6 @@
+﻿id,question
+q1,"Explain what build_vectorstore does and what data it uses."
+q2,"How does Repo Copilot search through the repository files before using RAG?"
+q3,"What are the main tools that the Repo Copilot agent can call, and what does each one do?"
+q4,"How does the critic evaluate the agent's answers in this project?"
+q5,"What is the purpose of the CLI demo command in this repository?"

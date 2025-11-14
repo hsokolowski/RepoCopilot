@@ -1,0 +1,60 @@
+﻿flowchart TD
+    %% 1. Input
+    U["User CLI (.cli.py)"] --> C["Controller (run_agent_once)"]
+
+    %% 2. Router
+    subgraph "Agent Core"
+        C --> R{"Router (_get_intent)"}
+
+        %% 3. Path A: Question
+        R -- "intent: question" --> HQ["_handle_question_intent"]
+        HQ --> T_RAG("Call Tool: rag_retrieve")
+        T_RAG --> F["Format RAG Answer"]
+        F --> E_Q["Evaluate (Critic)"]
+        E_Q --> Out["Final Result (AgentResult)"]
+
+        %% 4. Path B: Task (ReAct Loop)
+        R -- "intent: task_patch" --> HT["Start ReAct Loop (_handle_task...)"]
+
+        subgraph "ReAct Loop (Reason/Act)"
+            direction TB
+            HT --> T["Thought (LLM + AGENT_TASK_PROMPT)"]
+            T --> A["Action (LLM Output)"]
+            A --> TE{"Tool Executor (_parse_...)"}
+
+            TE -- "search..." --> T1("Call Tool: search_repo")
+            TE -- "inspect..." --> T2("Call Tool: inspect_file")
+            TE -- "propose..." --> T3("Call Tool: propose_patch")
+
+            T1 --> O["Observation (data)"]
+            T2 --> O
+            T3 --> O_Patch["Observation (patch_markdown)"]
+
+            O --> HT
+            O_Patch --> HT
+
+            TE -- "finish" --> F_Task["Format Task Answer"]
+        end
+
+        F_Task --> E_T["Evaluate (Critic)"]
+
+        %% 5. Finalize PR (ONLY for Task Path)
+        E_T --> C_PR{"Check Score >= Threshold"}
+        C_PR -- "No (Score too low)" --> Out
+        C_PR -- "Yes (Score is high)" --> T_PR["Call Tool: generate_pr_payload"]
+        T_PR --> Out
+    end
+
+    %% 6. Dependencies
+    subgraph "Data & LLMs"
+        T_RAG --> V["(ChromaDB)"]
+        T1 --> FS["(File System)"]
+        T2 --> FS
+
+        T3 --> LLM_Patch["LLM (Patcher)"]
+        E_Q --> LLM_Critic["LLM (Critic)"]
+        E_T --> LLM_Critic
+        T --> LLM_Agent["LLM (Agent Brain)"]
+        R --> LLM_Agent
+        HQ --> LLM_Agent
+    end
