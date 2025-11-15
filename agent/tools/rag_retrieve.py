@@ -16,7 +16,6 @@ from langchain.chains.llm import LLMChain
 from sentence_transformers.cross_encoder import CrossEncoder
 from collections import OrderedDict
 
-# ----------------------------------------
 
 def _automerge_by_file(
     docs: List[Document],
@@ -82,13 +81,35 @@ def _automerge_by_file(
 
     return merged_docs
 
-def _augment_query(question: str, llm) -> str:
-    """Rewrites the user's query to be better for RAG."""
+
+def _augment_query(question: str, llm, context: str = "") -> str:
+    """
+    Rewrites the user's query to be better for RAG.
+
+    Uwaga:
+    - QUERY_AUGMENT_PROMPT_STR oczekuje zmiennych: {query}, {context}
+    - dlatego MUSIMY przekazać oba klucze w słowniku wejściowym.
+    """
     try:
         aug_prompt = PromptTemplate.from_template(QUERY_AUGMENT_PROMPT_STR)
-        aug_chain = aug_prompt | llm
-        resp = aug_chain.invoke({"question": question})
-        return (getattr(resp, "content", None) or str(resp)).strip()
+        aug_chain = LLMChain(llm=llm, prompt=aug_prompt)
+
+        # przekazujemy DOKŁADNIE te zmienne, które są w promptcie
+        resp = aug_chain.invoke(
+            {
+                "query": question,
+                "context": context or "",
+            }
+        )
+
+        # LLMChain.invoke zwykle zwraca dict z kluczem "text"
+        if isinstance(resp, dict) and "text" in resp:
+            raw = resp["text"]
+        else:
+            raw = getattr(resp, "content", None) or str(resp)
+
+        return str(raw).strip()
+
     except Exception as e:
         print(f"[WARN] Query augmentation failed: {e}. Using original query.")
         return question
@@ -109,11 +130,16 @@ def rag_retrieve(
     llm = get_llm(name=llm_backend, temperature=temperature)
     vs = build_vectorstore(rebuild=rebuild_index)
 
-    # --- ETAP 1: AUGMENTACJA (bez zmian) ---
+    # --- ETAP 1: AUGMENTACJA ZAPYTANIA ---
+    # Na razie używamy pustego contextu (można go później zasilać
+    # np. kilkoma pierwszymi wynikami retrievalu).
+    context_for_augment = ""
     effective_query = question
+
     if use_augmentation:
-        effective_query = _augment_query(question, llm)
-        print(f"[INFO] RAG Effective Query: {effective_query}")
+        effective_query = _augment_query(question, llm, context_for_augment)
+
+    print(f"[INFO] RAG Effective Query: {effective_query}")
 
     # --- ETAP 2: POBRANIE (Retrieve) ---
     # Pobieramy więcej (np. 15) "brudnych" dokumentów z bazy wektorowej
@@ -128,7 +154,7 @@ def rag_retrieve(
             "effective_query": effective_query,
         }
 
-    # --- !! ETAP 3: RERANKING !! ---
+    # --- ETAP 3: RERANKING ---
     print(f"[INFO] Reranking {len(dirty_docs)} documents...")
 
     # 1. Inicjalizujemy model Rerankera (pobierze się automatycznie za pierwszym razem)
@@ -167,12 +193,12 @@ def rag_retrieve(
     synthesis_chain = LLMChain(llm=llm, prompt=RAG_PROMPT)
 
     # Wywołujemy LLM z naszym czystym kontekstem
-    res = synthesis_chain.invoke({"context": context, "question": effective_query})
+    res = synthesis_chain.invoke({"context": context, "question": question})
     answer: str = res.get("text", "Error synthesizing answer.")
 
-    # --- ETAP 5: Formatowanie źródeł (bez zmian) ---
+    # --- ETAP 5: Formatowanie źródeł ---
     sources = []
-    for d in merged_docs:  # Używamy 'clean_docs'
+    for d in merged_docs:
         meta = d.metadata or {}
         file_ = meta.get("file") or meta.get("source") or "doc"
         page = meta.get("page", None)
