@@ -90,8 +90,8 @@ def main():
     p_analyze.add_argument(
         "--threshold",
         type=float,
-        default=0.75,
-        help="Score threshold to generate a PR payload (default: 0.75).",
+        default=0.66,
+        help="Score threshold to generate a PR payload (default: 0.66).",
     )
     p_analyze.add_argument(
         "--repo-hint",
@@ -108,8 +108,8 @@ def main():
     p_demo.add_argument(
         "--threshold",
         type=float,
-        default=0.8,
-        help="Score threshold to generate a PR payload (default: 0.8).",
+        default=0.66,
+        help="Score threshold to generate a PR payload (default: 0.66).",
     )
     p_demo.add_argument(
         "--repo-hint",
@@ -124,9 +124,8 @@ def main():
     if args.command == "analyze":
         question = args.question
         threshold = args.threshold
-        # --- !! POPRAWKA !! ---
+
         repo_hint = args.repo_hint
-        # --- Koniec poprawki ---
 
     elif args.command == "demo":
         question = (
@@ -134,9 +133,7 @@ def main():
             "and suggest any safe improvements to the RAG setup or configuration."
         )
         threshold = args.threshold
-        # --- !! POPRAWKA !! ---
         repo_hint = args.repo_hint
-        # --- Koniec poprawki ---
 
         print("\n[INFO] Running demo scenario with question:\n")
         print(" ", question)

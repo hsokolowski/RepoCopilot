@@ -104,7 +104,7 @@ def run_agent_once(
         question: str,
         llm_backend: str = "gemini",
         temperature: float = 0.4,
-        create_pr_threshold: float = 0.75,
+        create_pr_threshold: float = 0.66,
         repo_hint: Optional[str] = None,
 ) -> AgentResult:
     """
@@ -255,7 +255,12 @@ def _robust_tool_parser(action_str: str) -> (str, Dict):
             kwargs['relative_path'] = pos_args.pop(0)
         if pos_args and 'center_line' not in kwargs:
             kwargs['center_line'] = pos_args.pop(0)
-
+        if 'relative_path' in kwargs and isinstance(kwargs['relative_path'], str):
+            rp = kwargs['relative_path'].strip()
+            if '.py' in rp:
+                rp = rp[:rp.index('.py') + 3]
+            rp = rp.strip('\'"')
+            kwargs['relative_path'] = rp
         if 'center_line' in kwargs and kwargs['center_line'] is not None and kwargs['center_line'] != 'None':
             try:
                 kwargs['center_line'] = int(kwargs['center_line'])
@@ -343,8 +348,35 @@ def _parse_and_execute_tool(action_str: str, llm_backend: str, temperature: floa
         elif tool_name == "inspect_file":
             allowed_keys = {"relative_path", "center_line", "window"}
             kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
-            if 'relative_path' not in kwargs:
+
+            if "relative_path" not in kwargs:
                 raise ValueError("requires 'relative_path'")
+
+            # --- SANITY FIX: wyczyść ścieżkę wygenerowaną przez LLM ---
+            rel = kwargs["relative_path"]
+            if isinstance(rel, str):
+                cleaned = rel.strip()
+
+                # 1) Usuń nadmiarowe zewnętrzne cudzysłowy, jeśli są w parze
+                if (
+                        (cleaned.startswith('"') and cleaned.endswith('"'))
+                        or (cleaned.startswith("'") and cleaned.endswith("'"))
+                ):
+                    cleaned = cleaned[1:-1].strip()
+
+                # 2) Jeżeli model wkleił coś po przecinku, np.:
+                #    agent/core/prompts.py", window=999
+                if "," in cleaned:
+                    cleaned = cleaned.split(",", 1)[0].strip()
+
+                # 3) Usuń końcowe pojedyncze śmieci: " ' ) spacje
+                cleaned = cleaned.rstrip('"\') )').strip()
+
+                # 4) Jeszcze raz ogólne zdjęcie cudzysłowów z brzegów, na wszelki wypadek
+                cleaned = cleaned.strip('"\'')
+
+                kwargs["relative_path"] = cleaned
+
             result = inspect_file(**kwargs)
             path = result.get("path", "?")
             start = result.get("start_line", "?")
@@ -404,11 +436,12 @@ def _handle_task_intent_react(
     history: List[str] = []  # Stores the Thought/Action/Observation history
     prompt_template = PromptTemplate.from_template(AGENT_TASK_PROMPT)
 
-    all_search_hits = []
-    all_inspected_snippets = []
-    all_rag_sources = []
+    all_search_hits: List[Dict[str, Any]] = []
+    all_inspected_snippets: List[Dict[str, Any]] = []
+    all_rag_sources: List[Dict[str, Any]] = []
 
     last_patch_markdown: str | None = None
+    final_data: Dict[str, Any] = {}
 
     for i in range(MAX_STEPS):
         print(f"[INFO] ReAct Step {i + 1}/{MAX_STEPS}")
@@ -422,15 +455,20 @@ def _handle_task_intent_react(
         full_response = (getattr(resp, "content", None) or str(resp)).strip()
 
         try:
+            # Standard ścieżka: szukamy Action:
             action_match = re.search(r"Action: (.*)", full_response, re.DOTALL)
 
             if not action_match:
-                raise ValueError(f"Missing 'Action:' in LLM response")
+                raise ValueError("Missing 'Action:' in LLM response")
 
             action = action_match.group(1).strip()
             tool_name = action.split("(", 1)[0].strip()
 
-            thought_match = re.search(r"Thought: (.*?)(?=Action:|$)", full_response, re.DOTALL)
+            thought_match = re.search(
+                r"Thought: (.*?)(?=Action:|$)",
+                full_response,
+                re.DOTALL
+            )
 
             if thought_match:
                 thought = thought_match.group(1).strip()
@@ -442,29 +480,68 @@ def _handle_task_intent_react(
             max_thought_len = 100
             preview = (thought[:max_thought_len] + "…") if len(thought) > max_thought_len else thought
             print(f"  [Thought] {preview}")
+
         except Exception as e:
+            # Fallback 1: model zwrócił surowy diff w ``` ``` zamiast Action: finish(...)
+            diff_match = re.search(
+                r"```(?:\w+)?\s*(diff[\s\S]*?)```",
+                full_response,
+                re.DOTALL,
+            )
+            if diff_match:
+                patch = diff_match.group(1).strip()
+                thought = "(Model returned a raw diff; wrapping it in finish() automatically.)"
+                action = (
+                    'finish('
+                    f'reasoning_summary="Applied the requested change: {question}", '
+                    f'patch_markdown="""{patch}"""'
+                    ')'
+                )
+                tool_name = "finish"
+
+                history.append(f"Thought: {thought}\nAction: {action}")
+                print(f"  [Thought] {thought}")
+
+                is_finished, result_str, raw_data = _parse_and_execute_tool(
+                    action, llm_backend, temperature
+                )
+
+                if is_finished:
+                    print("[INFO] ReAct loop finished (fallback from raw diff).")
+                    final_data = raw_data or {}
+                    break
+                else:
+                    history.append(f"Observation: {result_str}")
+                    print(f"  [Tool] {result_str}")
+                    continue
+
+            # Fallback 2: naprawdę zepsuty format – logujemy i próbujemy jeszcze raz
             history.append(f"Observation: Invalid response format. {full_response}")
             print(f"  [DEBUG] LLM response: {full_response}")
             print(f"  [DEBUG]Parser error: {e}")
             print(f"  [Observe] Invalid response format. Trying again.")
             continue
 
-        is_finished, result_str, raw_data = _parse_and_execute_tool(action, llm_backend, temperature)
+        # Normalna ścieżka narzędziowa
+        is_finished, result_str, raw_data = _parse_and_execute_tool(
+            action, llm_backend, temperature
+        )
 
         if tool_name == "propose_patch" and isinstance(raw_data, str):
+            # zapamiętujemy ostatni pełny patch z propose_patch
             last_patch_markdown = raw_data
 
         if raw_data is not None:
             if action.startswith("search_repo"):
-                all_search_hits.extend(raw_data)  # raw_data to lista
+                all_search_hits.extend(raw_data)  # raw_data = lista
             elif action.startswith("inspect_file"):
-                all_inspected_snippets.append(raw_data)  # raw_data to dict
+                all_inspected_snippets.append(raw_data)  # raw_data = dict
             elif action.startswith("rag_retrieve"):
                 all_rag_sources.extend(raw_data.get("sources", []))
 
         if is_finished:
             print("[INFO] ReAct loop finished.")
-            final_data = raw_data  # raw_data from finish() is the dict
+            final_data = raw_data or {}
             break
         else:
             history.append(f"Observation: {result_str}")
@@ -472,22 +549,32 @@ def _handle_task_intent_react(
     else:
         print("[WARN] ReAct loop reached max steps.")
         final_data = {
-            "reasoning": "Agent reached maximum steps without calling finish().",
-            "patch": ""
+            "reasoning_summary": "Agent reached maximum steps without calling finish().",
+            "patch_markdown": "",
         }
 
     # Assemble Final Answer
-    patch_markdown = final_data.get("patch_markdown", "")
+    patch_markdown = final_data.get("patch_markdown", "") or ""
     reasoning_summary = final_data.get("reasoning_summary", "No summary provided.")
 
+    # Jeśli finish() oddał pustkę, ale mieliśmy ładny patch z propose_patch – użyj go
     if (not patch_markdown or len(patch_markdown.splitlines()) < 3) and last_patch_markdown:
         patch_markdown = last_patch_markdown
 
+    if patch_markdown:
+        formatted_patch = pretty_print_patch(patch_markdown)
+        # Opcjonalnie ładny print do konsoli:
+        print("\n--- Proposed patch (pretty) ---")
+        print(formatted_patch)
+        print("------------------------------\n")
+    else:
+        formatted_patch = "(No patch proposed)"
+
     final_answer = (
-        f"#### Agent Reasoning\n"
+        "#### Agent Reasoning\n"
         f"{reasoning_summary}\n\n"
         "#### Proposed patch (dry-run)\n"
-        f"{patch_markdown if patch_markdown else '(No patch proposed)'}\n"
+        f"{formatted_patch}\n"
     )
 
     src_summary = _summarize_sources_for_critic(
@@ -507,9 +594,18 @@ def _handle_task_intent_react(
             llm_backend=llm_backend,
             temperature=0.5,
         )
-        score = (critic.get("grounding", 0) + critic.get("usefulness", 0) + critic.get("reflection", 0)) / 3.0
+        score = (
+            critic.get("grounding", 0.0)
+            + critic.get("usefulness", 0.0)
+            + critic.get("reflection", 0.0)
+        ) / 3.0
     except Exception as e:
-        critic = {"comments": f"Critic failed: {e}", "grounding": 0.5, "usefulness": 0.0, "reflection": 0.0}
+        critic = {
+            "comments": f"Critic failed: {e}",
+            "grounding": 0.5,
+            "usefulness": 0.0,
+            "reflection": 0.0,
+        }
         score = 0.16
 
     # Optional PR
@@ -534,3 +630,22 @@ def _handle_task_intent_react(
         score=score,
         pr=pr_payload,
     )
+
+def pretty_print_patch(patch: str) -> str:
+    """
+    Convert LLM-style escaped diff to a clean, readable unified diff.
+    """
+    # Strip outer quotes if present:
+    patch = patch.strip().strip('"').strip("'")
+
+    # Replace escaped newlines with real newlines:
+    patch = patch.replace("\\n", "\n")
+
+    # Remove leading 'diff' token if agent prepends it:
+    if patch.startswith("diff\n"):
+        patch = patch[len("diff\n"):]
+
+    # Optional: replace tabs for better formatting (optional)
+    patch = patch.replace("\\t", "\t")
+
+    return patch

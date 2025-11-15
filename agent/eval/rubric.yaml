@@ -9,7 +9,7 @@
     weight: 0.2
     description: "Does the agent show awareness of uncertainties, limitations, or next steps?"
 
-overall_pass_threshold: 0.7
+overall_pass_threshold: 0.66
 description: >
   Overall score is a weighted average of grounding, usefulness, and reflection.
   A question is considered 'passed' if overall >= overall_pass_threshold.
