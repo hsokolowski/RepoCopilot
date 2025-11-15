@@ -52,8 +52,12 @@ DEFAULT_EXCLUDED_DIRS = {
 RAG_PROMPT = PromptTemplate(
     input_variables=["context", "question"],
     template=(
-        "You are an AI reasoning agent. You answer ONLY from the provided context.\n"
-        "If the context is insufficient, say 'I don't know based on the repository context'.\n\n"
+        "You are an AI assistant helping a developer understand this repository.\n"
+        "Base your answer on the provided context. It is acceptable to summarize and\n"
+        "infer high-level concepts (like architecture, data flow, responsibilities,\n"
+        "and main components) from file names, directory layout, and code snippets.\n"
+        "Only if the context is clearly unrelated to the question or completely\n"
+        "empty, say 'I don't know based on the repository context'.\n\n"
         "Context:\n{context}\n\n"
         "Question:\n{question}\n\n"
         "Answer:"

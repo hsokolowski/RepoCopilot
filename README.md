@@ -114,6 +114,7 @@ Create a `data/` folder and copy materials there (PDFs, .txt, .md, .mp3, etc.).
 ```bash
  python scripts/build_index.py
 ```
+(RepoCopilot is loading around 20-30mins, so maybe better to pick smaller repo or one file)
 
 This script calls the `rag_pipeline.vectorstore.build_vectorstore` function, which:
 

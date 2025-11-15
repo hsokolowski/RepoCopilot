@@ -36,7 +36,7 @@ class AgentResult:
     answer: str
     patch_markdown: str
     search_hits: List[Dict[str, Any]]
-    inspected_snippets: List[Dict[str, Any]]  # **ZMIENIONE NA LISTĘ**
+    inspected_snippets: List[Dict[str, Any]]
     rag_answer: str
     rag_sources: List[Dict[str, Any]]
     critic: Dict[str, Any]
@@ -49,7 +49,7 @@ class AgentResult:
 
 def _summarize_sources_for_critic(
         search_hits: List[Dict[str, Any]],
-        inspected_snippets: List[Dict[str, Any]],  # **ZMIENIONE NA LISTĘ**
+        inspected_snippets: List[Dict[str, Any]],
         rag_sources: List[Dict[str, Any]],
 ) -> str:
     """Helper to create a concise summary for the critic."""
@@ -61,7 +61,7 @@ def _summarize_sources_for_critic(
 
     if inspected_snippets:
         parts.append("Inspected File Snippets (Evidence):")
-        # Pokaż 2 ostatnie (najważniejsze)
+
         for s in inspected_snippets[-2:]:
             parts.append(f"--- (from {s['path']}) ---\n{s['snippet'][:300]}\n---")
 
@@ -147,7 +147,7 @@ def _handle_question_intent(
 
     rag_res = rag_retrieve(
         question=question, k=5, llm_backend=llm_backend,
-        temperature=temperature, use_augmentation=False
+        temperature=temperature, use_augmentation=True
     )
     rag_answer = rag_res["answer"]
     rag_sources = rag_res["sources"]
@@ -222,7 +222,7 @@ def _robust_tool_parser(action_str: str) -> (str, Dict):
             if not arg:
                 continue
 
-            # Check for keyword arguments (key=value)
+        # Check for keyword arguments (key=value)
             kv_match = re.match(r'(\w+)\s*=\s*(.*)', arg, re.DOTALL)
             if kv_match:
                 key = kv_match.group(1).strip()
@@ -232,7 +232,6 @@ def _robust_tool_parser(action_str: str) -> (str, Dict):
                 if (value.startswith('"') and value.endswith('"')) or \
                         (value.startswith("'") and value.endswith("'")):
                     try:
-                        # Użyj ast.literal_eval do bezpiecznego od-cytowania stringu
                         kwargs[key] = ast.literal_eval(value)
                     except Exception:
                         kwargs[key] = value[1:-1]  # Fallback
@@ -243,8 +242,6 @@ def _robust_tool_parser(action_str: str) -> (str, Dict):
                 pos_args.append(arg.strip('"\' '))
 
     # 4. Map positional args and convert types based on tool name
-    #    (Bloki 'elif' są kluczowe, aby zapobiec błędom)
-
     if tool_name == 'search_repo':
         if pos_args and 'query' not in kwargs:
             kwargs['query'] = pos_args[0]
@@ -253,27 +250,24 @@ def _robust_tool_parser(action_str: str) -> (str, Dict):
         if pos_args and 'question' not in kwargs:
             kwargs['question'] = pos_args[0]
 
-
     elif tool_name == 'inspect_file':
         if pos_args and 'relative_path' not in kwargs:
             kwargs['relative_path'] = pos_args.pop(0)
         if pos_args and 'center_line' not in kwargs:
             kwargs['center_line'] = pos_args.pop(0)
 
-            # --- !! POPRAWKA: Konwersja typów przeniesiona tutaj !! ---
         if 'center_line' in kwargs and kwargs['center_line'] is not None and kwargs['center_line'] != 'None':
             try:
                 kwargs['center_line'] = int(kwargs['center_line'])
             except (ValueError, TypeError):
-                kwargs['center_line'] = None  # Błąd parsowania, ustaw na None
-        elif 'center_line' in kwargs:
+                kwargs['center_line'] = None
             kwargs['center_line'] = None
 
         if 'window' in kwargs and kwargs['window'] is not None:
             try:
                 kwargs['window'] = int(kwargs['window'])
             except (ValueError, TypeError):
-                kwargs['window'] = 20  # Błąd parsowania, ustaw na default
+                kwargs['window'] = 20
         elif 'center_line' in kwargs:
             kwargs['center_line'] = None
         if 'window' in kwargs and kwargs['window'] is not None:
@@ -318,39 +312,60 @@ def _robust_tool_parser(action_str: str) -> (str, Dict):
 
     return tool_name, kwargs
 
+
 def _parse_and_execute_tool(action_str: str, llm_backend: str, temperature: float) -> (bool, str, Any):
     """
     Parses and executes a tool.
     Returns (is_finished, tool_output_string, raw_data_or_none)
     """
     action_str = action_str.strip().replace("`", "")
-    print(f"  [Action]  {action_str}")
 
     try:
         tool_name, kwargs = _robust_tool_parser(action_str)
 
         if tool_name == "finish":
-            return True, "Observation: finish() called.", kwargs
+
+            return True, "finish()", kwargs
 
         elif tool_name == "search_repo":
-            if 'query' not in kwargs: raise ValueError("requires 'query'")
+            allowed_keys = {"query", "max_results", "file_globs", "include_tests", "repo_root"}
+            kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
+
+            if 'query' not in kwargs:
+                raise ValueError("requires 'query'")
+
             result = search_repo(**kwargs)
-            return False, f"Observation: {json.dumps(result)}", result  # Return raw list
+            count = len(result)
+            preview = ", ".join(r["path"] for r in result[:3])
+            summary = f"search_repo -> {count} hits" + (f" (e.g. {preview})" if preview else "")
+            return False, summary, result
 
         elif tool_name == "inspect_file":
-            if 'relative_path' not in kwargs: raise ValueError("requires 'relative_path'")
+            allowed_keys = {"relative_path", "center_line", "window"}
+            kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
+            if 'relative_path' not in kwargs:
+                raise ValueError("requires 'relative_path'")
             result = inspect_file(**kwargs)
-            return False, f"Observation: (Content of {kwargs['relative_path']})\n{result['snippet']}", result  # Return raw dict
+            path = result.get("path", "?")
+            start = result.get("start_line", "?")
+            end = result.get("end_line", "?")
+            summary = f"inspect_file -> {path} (lines {start}–{end})"
+            return False, summary, result  # raw_data = dict
 
         elif tool_name == "rag_retrieve":
-            if 'question' not in kwargs: raise ValueError("requires 'question'")
+            if 'question' not in kwargs:
+                raise ValueError("requires 'question'")
             result = rag_retrieve(
                 llm_backend=llm_backend, temperature=temperature, **kwargs
             )
-            return False, f"Observation: {result['answer']} (Sources: {json.dumps(result['sources'])})", result  # Return raw dict
+            src_count = len(result.get("sources", []))
+            eff_q = result.get("effective_query", kwargs["question"])
+            summary = f"rag_retrieve -> {src_count} sources (effective_query='{eff_q}')"
+            return False, summary, result  # raw_data = dict
 
         elif tool_name == "propose_patch":
-            if 'issue_description' not in kwargs: raise ValueError("requires 'issue_description'")
+            if 'issue_description' not in kwargs:
+                raise ValueError("requires 'issue_description'")
 
             evidence_list = [{"snippet": ev} for ev in kwargs.get("evidence_snippets", [])]
 
@@ -360,15 +375,17 @@ def _parse_and_execute_tool(action_str: str, llm_backend: str, temperature: floa
                 llm_backend=llm_backend,
                 temperature=temperature
             )
-            return False, f"Observation: {result_patch}", result_patch  # Return raw string
+            summary = f"propose_patch -> patch markdown ({len(result_patch)} chars)"
+            return False, summary, result_patch  # raw_data = string
 
         else:
-            return False, f"Observation: Unknown tool '{tool_name}'.", None
+            return False, f"Unknown tool '{tool_name}'", None
 
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return False, f"Observation: Tool Error: {e}. Check tool name and arguments.", None
+        tool = tool_name if "tool_name" in locals() else "unknown"
+        return False, f"Tool Error in {tool}: {e}", None
 
 
 def _handle_task_intent_react(
@@ -391,6 +408,8 @@ def _handle_task_intent_react(
     all_inspected_snippets = []
     all_rag_sources = []
 
+    last_patch_markdown: str | None = None
+
     for i in range(MAX_STEPS):
         print(f"[INFO] ReAct Step {i + 1}/{MAX_STEPS}")
 
@@ -403,16 +422,14 @@ def _handle_task_intent_react(
         full_response = (getattr(resp, "content", None) or str(resp)).strip()
 
         try:
-            # Szukamy akcji, bo jest kluczowa.
             action_match = re.search(r"Action: (.*)", full_response, re.DOTALL)
 
             if not action_match:
-                # Jeśli nie ma nawet 'Action:', odpowiedź jest bezużyteczna
                 raise ValueError(f"Missing 'Action:' in LLM response")
 
             action = action_match.group(1).strip()
+            tool_name = action.split("(", 1)[0].strip()
 
-            # 'Thought:' jest teraz opcjonalna.
             thought_match = re.search(r"Thought: (.*?)(?=Action:|$)", full_response, re.DOTALL)
 
             if thought_match:
@@ -421,15 +438,21 @@ def _handle_task_intent_react(
                 thought = "(Thought missing in LLM response)"
 
             history.append(f"Thought: {thought}\nAction: {action}")
-            print(f"  [Thought] {thought}")
+
+            max_thought_len = 100
+            preview = (thought[:max_thought_len] + "…") if len(thought) > max_thought_len else thought
+            print(f"  [Thought] {preview}")
         except Exception as e:
             history.append(f"Observation: Invalid response format. {full_response}")
-            print(f"  [DEBUG] LLM zwrócił: {full_response}")
-            print(f"  [DEBUG] Błąd parsera: {e}")
+            print(f"  [DEBUG] LLM response: {full_response}")
+            print(f"  [DEBUG]Parser error: {e}")
             print(f"  [Observe] Invalid response format. Trying again.")
             continue
 
         is_finished, result_str, raw_data = _parse_and_execute_tool(action, llm_backend, temperature)
+
+        if tool_name == "propose_patch" and isinstance(raw_data, str):
+            last_patch_markdown = raw_data
 
         if raw_data is not None:
             if action.startswith("search_repo"):
@@ -444,8 +467,8 @@ def _handle_task_intent_react(
             final_data = raw_data  # raw_data from finish() is the dict
             break
         else:
-            history.append(result_str)  # Add Observation to history
-            print(f"  [Observe] {result_str[:300]}...")
+            history.append(f"Observation: {result_str}")
+            print(f"  [Tool] {result_str}")
     else:
         print("[WARN] ReAct loop reached max steps.")
         final_data = {
@@ -456,6 +479,9 @@ def _handle_task_intent_react(
     # Assemble Final Answer
     patch_markdown = final_data.get("patch_markdown", "")
     reasoning_summary = final_data.get("reasoning_summary", "No summary provided.")
+
+    if (not patch_markdown or len(patch_markdown.splitlines()) < 3) and last_patch_markdown:
+        patch_markdown = last_patch_markdown
 
     final_answer = (
         f"#### Agent Reasoning\n"
